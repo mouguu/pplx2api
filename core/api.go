@@ -234,7 +234,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 
 func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
 	defer body.Close()
-	// 设置流式响应头
+	// 1. 设置响应头
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
 		gc.Writer.Header().Set("Cache-Control", "no-cache")
@@ -245,13 +245,14 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 	scanner := bufio.NewScanner(body)
 	clientDone := gc.Request.Context().Done()
+	// 增加缓冲区到 1MB，应对顶级模型的大数据返回
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	// --- 状态追踪器 (局部变量，天然线程安全) ---
-	full_text := ""
-	lastReasoningLen := 0
-	lastMarkdownLen := 0
-	hasThinkOpen := false
+	// --- 状态追踪器 (局部变量，天然支持并发安全) ---
+	var full_text string
+	var lastReasoningLen int
+	var lastMarkdownLen int
+	var hasThinkOpen bool
 
 	for scanner.Scan() {
 		select {
@@ -269,77 +270,71 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		data := line[6:]
 		var response PerplexityResponse
 		if err := json.Unmarshal([]byte(data), &response); err != nil {
-			logger.Error(fmt.Sprintf("Error parsing JSON: %v", err))
 			continue
 		}
 
-		// 1. 处理推理块 (Reasoning) - 增量去重
+		// --- 逻辑 A: 增量提取 Reasoning (Thinking) ---
 		for _, block := range response.Blocks {
-			if block.ReasoningPlanBlock != nil {
-				currentReasoning := ""
+			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
+				var sb strings.Builder
 				for _, goal := range block.ReasoningPlanBlock.Goals {
-					// 过滤掉无意义的系统提示
+					// 过滤系统噪音
 					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
-						currentReasoning += goal.Description
+						sb.WriteString(goal.Description)
 					}
 				}
 
-				// 计算增量 (使用 rune 处理多字节字符)
-				currentReasoningRunes := []rune(currentReasoning)
-				if len(currentReasoningRunes) > lastReasoningLen {
-					newText := string(currentReasoningRunes[lastReasoningLen:])
-					lastReasoningLen = len(currentReasoningRunes)
+				currentRunes := []rune(sb.String())
+				if len(currentRunes) > lastReasoningLen {
+					newText := string(currentRunes[lastReasoningLen:])
+					lastReasoningLen = len(currentRunes)
 
-					res_text := ""
-					// 智能开启 <think>
+					res := ""
 					if !hasThinkOpen {
-						res_text += "<think>"
+						res += "<think>"
 						hasThinkOpen = true
 					}
-					res_text += newText
-					full_text += res_text
-
+					res += newText
+					full_text += res
 					if stream {
-						model.ReturnOpenAIResponse(res_text, stream, gc)
+						model.ReturnOpenAIResponse(res, stream, gc)
 					}
 				}
 			}
 		}
 
-		// 2. 处理正文块 (Markdown) - 增量去重
+		// --- 逻辑 B: 增量提取 Markdown (正文) ---
 		for _, block := range response.Blocks {
-			if block.MarkdownBlock != nil {
-				currentMarkdown := ""
+			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 {
+				var sb strings.Builder
 				for _, chunk := range block.MarkdownBlock.Chunks {
-					currentMarkdown += chunk
+					sb.WriteString(chunk)
 				}
 
-				// 计算增量 (使用 rune 处理多字节字符)
-				currentMarkdownRunes := []rune(currentMarkdown)
-				if len(currentMarkdownRunes) > lastMarkdownLen {
-					newText := string(currentMarkdownRunes[lastMarkdownLen:])
-					lastMarkdownLen = len(currentMarkdownRunes)
+				currentRunes := []rune(sb.String())
+				if len(currentRunes) > lastMarkdownLen {
+					newText := string(currentRunes[lastMarkdownLen:])
+					lastMarkdownLen = len(currentRunes)
 
-					res_text := ""
-					// 如果正文开始了，且 <think> 还没关，强制关闭
+					res := ""
+					// 如果正文开始了但思考标签没关，强制关闭
 					if hasThinkOpen {
-						res_text += "</think>\n\n"
+						res += "</think>\n\n"
 						hasThinkOpen = false
 					}
-					res_text += newText
-					full_text += res_text
-
+					res += newText
+					full_text += res
 					if stream {
-						model.ReturnOpenAIResponse(res_text, stream, gc)
+						model.ReturnOpenAIResponse(res, stream, gc)
 					}
 				}
 			}
 		}
 
-		// 3. 处理完成状态 (Images & Search Results)
+		// --- 逻辑 C: 处理完成状态 (图片/搜索/清理) ---
 		if response.Status == "COMPLETED" {
 
-			// 兜底：如果结束了 <think> 还没关，关掉它
+			// 1. 强制关闭思考标签 (兜底)
 			if hasThinkOpen {
 				closeTag := "</think>\n\n"
 				full_text += closeTag
@@ -349,48 +344,48 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				hasThinkOpen = false
 			}
 
-			// 处理图片
+			// 2. 处理图片
 			for _, block := range response.Blocks {
 				if block.ImageModeBlock != nil && block.ImageModeBlock.Progress == "DONE" && len(block.ImageModeBlock.MediaItems) > 0 {
-					imageResultsText := ""
-					imageModelList := []string{}
+					var imgText string
+					var modelList []string
 					for i, result := range block.ImageModeBlock.MediaItems {
-						imageResultsText += utils.ImageShow(i, result.Name, result.Image)
-						imageModelList = append(imageModelList, result.Name)
+						imgText += utils.ImageShow(i, result.Name, result.Image)
+						modelList = append(modelList, result.Name)
 					}
-					if len(imageModelList) > 0 {
-						imageResultsText = imageResultsText + "\n\n---\n" + strings.Join(imageModelList, ", ")
+					if len(modelList) > 0 {
+						imgText += "\n\n---\n" + strings.Join(modelList, ", ")
 					}
-					full_text += imageResultsText
+					full_text += imgText
 					if stream {
-						model.ReturnOpenAIResponse(imageResultsText, stream, gc)
+						model.ReturnOpenAIResponse(imgText, stream, gc)
 					}
 				}
 			}
 
-			// 处理搜索结果
+			// 3. 处理搜索结果
 			for _, block := range response.Blocks {
 				if !config.ConfigInstance.IgnoreSerchResult && block.WebResultBlock != nil && len(block.WebResultBlock.WebResults) > 0 {
-					webResultsText := "\n\n---\n"
+					webText := "\n\n---\n"
 					for i, result := range block.WebResultBlock.WebResults {
-						webResultsText += "\n\n" + utils.SearchShow(i, result.Name, result.URL, result.Snippet)
+						webText += "\n\n" + utils.SearchShow(i, result.Name, result.URL, result.Snippet)
 					}
-					full_text += webResultsText
+					full_text += webText
 					if stream {
-						model.ReturnOpenAIResponse(webResultsText, stream, gc)
+						model.ReturnOpenAIResponse(webText, stream, gc)
 					}
 				}
 			}
 
-			// 处理模型监控
+			// 4. 处理实际模型监控
 			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
-				res_text := "\n\n---\n" + fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
-				full_text += res_text
+				monText := "\n\n---\n" + fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
+				full_text += monText
 				if stream {
-					model.ReturnOpenAIResponse(res_text, stream, gc)
+					model.ReturnOpenAIResponse(monText, stream, gc)
 				}
 			}
-			break // 退出循环
+			break
 		}
 	}
 
@@ -398,6 +393,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		return fmt.Errorf("error reading response: %w", err)
 	}
 
+	// 4. 发送结束标记或最终全量内容
 	if !stream {
 		model.ReturnOpenAIResponse(full_text, stream, gc)
 	} else {
