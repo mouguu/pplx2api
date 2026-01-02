@@ -234,7 +234,6 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 
 func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
 	defer body.Close()
-	// 1. 设置响应头
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
 		gc.Writer.Header().Set("Cache-Control", "no-cache")
@@ -245,13 +244,12 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 	scanner := bufio.NewScanner(body)
 	clientDone := gc.Request.Context().Done()
-	// 增加缓冲区到 1MB，应对顶级模型的大数据返回
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
-	// --- 状态追踪器 (局部变量，天然支持并发安全) ---
+	// --- 终极状态追踪器 ---
 	var full_text string
-	var lastReasoningLen int
-	var lastMarkdownLen int
+	var currentReasoning string // 记录完整的推理历史
+	var currentMarkdown string  // 记录完整的正文历史
 	var hasThinkOpen bool
 
 	for scanner.Scan() {
@@ -273,56 +271,53 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			continue
 		}
 
-		// --- 逻辑 A: 增量提取 Reasoning (Thinking) ---
+		// --- 专家级：多块增量去重算法 ---
 		for _, block := range response.Blocks {
-			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
+			// 1. 处理推理块
+			if block.ReasoningPlanBlock != nil {
 				var sb strings.Builder
 				for _, goal := range block.ReasoningPlanBlock.Goals {
-					// 过滤系统噪音
 					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
 						sb.WriteString(goal.Description)
 					}
 				}
-
-				currentRunes := []rune(sb.String())
-				if len(currentRunes) > lastReasoningLen {
-					newText := string(currentRunes[lastReasoningLen:])
-					lastReasoningLen = len(currentRunes)
+				newTotal := sb.String()
+				// 只有当新内容确实包含了旧内容且更长时，才提取增量
+				if len(newTotal) > len(currentReasoning) && strings.HasPrefix(newTotal, currentReasoning) {
+					delta := newTotal[len(currentReasoning):]
+					currentReasoning = newTotal // 更新完整历史
 
 					res := ""
 					if !hasThinkOpen {
 						res += "<think>"
 						hasThinkOpen = true
 					}
-					res += newText
+					res += delta
 					full_text += res
 					if stream {
 						model.ReturnOpenAIResponse(res, stream, gc)
 					}
 				}
 			}
-		}
 
-		// --- 逻辑 B: 增量提取 Markdown (正文) ---
-		for _, block := range response.Blocks {
-			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 {
+			// 2. 处理正文块
+			if block.MarkdownBlock != nil {
 				var sb strings.Builder
 				for _, chunk := range block.MarkdownBlock.Chunks {
 					sb.WriteString(chunk)
 				}
-
-				currentRunes := []rune(sb.String())
-				if len(currentRunes) > lastMarkdownLen {
-					newText := string(currentRunes[lastMarkdownLen:])
-					lastMarkdownLen = len(currentRunes)
+				newTotal := sb.String()
+				// 核心：精准前缀对齐去重
+				if len(newTotal) > len(currentMarkdown) && strings.HasPrefix(newTotal, currentMarkdown) {
+					delta := newTotal[len(currentMarkdown):]
+					currentMarkdown = newTotal // 更新完整历史
 
 					res := ""
-					// 如果正文开始了但思考标签没关，强制关闭
 					if hasThinkOpen {
 						res += "</think>\n\n"
 						hasThinkOpen = false
 					}
-					res += newText
+					res += delta
 					full_text += res
 					if stream {
 						model.ReturnOpenAIResponse(res, stream, gc)
@@ -331,9 +326,8 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 			}
 		}
 
-		// --- 逻辑 C: 处理完成状态 (图片/搜索/清理) ---
+		// 3. 处理完成与元数据
 		if response.Status == "COMPLETED" {
-
 			// 1. 强制关闭思考标签 (兜底)
 			if hasThinkOpen {
 				closeTag := "</think>\n\n"
