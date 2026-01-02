@@ -284,10 +284,11 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 				}
 
-				// 计算增量
-				if len(currentReasoning) > lastReasoningLen {
-					newText := currentReasoning[lastReasoningLen:]
-					lastReasoningLen = len(currentReasoning)
+				// 计算增量 (使用 rune 处理多字节字符)
+				currentReasoningRunes := []rune(currentReasoning)
+				if len(currentReasoningRunes) > lastReasoningLen {
+					newText := string(currentReasoningRunes[lastReasoningLen:])
+					lastReasoningLen = len(currentReasoningRunes)
 
 					res_text := ""
 					// 智能开启 <think>
@@ -313,10 +314,11 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					currentMarkdown += chunk
 				}
 
-				// 计算增量
-				if len(currentMarkdown) > lastMarkdownLen {
-					newText := currentMarkdown[lastMarkdownLen:]
-					lastMarkdownLen = len(currentMarkdown)
+				// 计算增量 (使用 rune 处理多字节字符)
+				currentMarkdownRunes := []rune(currentMarkdown)
+				if len(currentMarkdownRunes) > lastMarkdownLen {
+					newText := string(currentMarkdownRunes[lastMarkdownLen:])
+					lastMarkdownLen = len(currentMarkdownRunes)
 
 					res_text := ""
 					// 如果正文开始了，且 <think> 还没关，强制关闭
