@@ -234,7 +234,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 
 func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context) error {
 	defer body.Close()
-	// Set headers for streaming
+	// 设置流式响应头
 	if stream {
 		gc.Writer.Header().Set("Content-Type", "text/event-stream")
 		gc.Writer.Header().Set("Cache-Control", "no-cache")
@@ -242,14 +242,17 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		gc.Writer.WriteHeader(http.StatusOK)
 		gc.Writer.Flush()
 	}
+
 	scanner := bufio.NewScanner(body)
 	clientDone := gc.Request.Context().Done()
-	// 增大缓冲区大小
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	// --- 状态追踪器 (局部变量，天然线程安全) ---
 	full_text := ""
-	inThinking := false
-	thinkShown := false
-	final := false
+	lastReasoningLen := 0
+	lastMarkdownLen := 0
+	hasThinkOpen := false
+
 	for scanner.Scan() {
 		select {
 		case <-clientDone:
@@ -259,23 +262,92 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		}
 
 		line := scanner.Text()
-		// Skip empty lines
-		if line == "" {
+		if line == "" || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
+
 		data := line[6:]
-		// logger.Info(fmt.Sprintf("Received data: %s", data))
 		var response PerplexityResponse
 		if err := json.Unmarshal([]byte(data), &response); err != nil {
 			logger.Error(fmt.Sprintf("Error parsing JSON: %v", err))
 			continue
 		}
-		// Check for completion and web results
+
+		// 1. 处理推理块 (Reasoning) - 增量去重
+		for _, block := range response.Blocks {
+			if block.ReasoningPlanBlock != nil {
+				currentReasoning := ""
+				for _, goal := range block.ReasoningPlanBlock.Goals {
+					// 过滤掉无意义的系统提示
+					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
+						currentReasoning += goal.Description
+					}
+				}
+
+				// 计算增量
+				if len(currentReasoning) > lastReasoningLen {
+					newText := currentReasoning[lastReasoningLen:]
+					lastReasoningLen = len(currentReasoning)
+
+					res_text := ""
+					// 智能开启 <think>
+					if !hasThinkOpen {
+						res_text += "<think>"
+						hasThinkOpen = true
+					}
+					res_text += newText
+					full_text += res_text
+
+					if stream {
+						model.ReturnOpenAIResponse(res_text, stream, gc)
+					}
+				}
+			}
+		}
+
+		// 2. 处理正文块 (Markdown) - 增量去重
+		for _, block := range response.Blocks {
+			if block.MarkdownBlock != nil {
+				currentMarkdown := ""
+				for _, chunk := range block.MarkdownBlock.Chunks {
+					currentMarkdown += chunk
+				}
+
+				// 计算增量
+				if len(currentMarkdown) > lastMarkdownLen {
+					newText := currentMarkdown[lastMarkdownLen:]
+					lastMarkdownLen = len(currentMarkdown)
+
+					res_text := ""
+					// 如果正文开始了，且 <think> 还没关，强制关闭
+					if hasThinkOpen {
+						res_text += "</think>\n\n"
+						hasThinkOpen = false
+					}
+					res_text += newText
+					full_text += res_text
+
+					if stream {
+						model.ReturnOpenAIResponse(res_text, stream, gc)
+					}
+				}
+			}
+		}
+
+		// 3. 处理完成状态 (Images & Search Results)
 		if response.Status == "COMPLETED" {
-			final = true
+
+			// 兜底：如果结束了 <think> 还没关，关掉它
+			if hasThinkOpen {
+				closeTag := "</think>\n\n"
+				full_text += closeTag
+				if stream {
+					model.ReturnOpenAIResponse(closeTag, stream, gc)
+				}
+				hasThinkOpen = false
+			}
+
+			// 处理图片
 			for _, block := range response.Blocks {
 				if block.ImageModeBlock != nil && block.ImageModeBlock.Progress == "DONE" && len(block.ImageModeBlock.MediaItems) > 0 {
 					imageResultsText := ""
@@ -283,18 +355,18 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					for i, result := range block.ImageModeBlock.MediaItems {
 						imageResultsText += utils.ImageShow(i, result.Name, result.Image)
 						imageModelList = append(imageModelList, result.Name)
-
 					}
 					if len(imageModelList) > 0 {
 						imageResultsText = imageResultsText + "\n\n---\n" + strings.Join(imageModelList, ", ")
 					}
 					full_text += imageResultsText
-
 					if stream {
 						model.ReturnOpenAIResponse(imageResultsText, stream, gc)
 					}
 				}
 			}
+
+			// 处理搜索结果
 			for _, block := range response.Blocks {
 				if !config.ConfigInstance.IgnoreSerchResult && block.WebResultBlock != nil && len(block.WebResultBlock.WebResults) > 0 {
 					webResultsText := "\n\n---\n"
@@ -302,71 +374,22 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 						webResultsText += "\n\n" + utils.SearchShow(i, result.Name, result.URL, result.Snippet)
 					}
 					full_text += webResultsText
-
 					if stream {
 						model.ReturnOpenAIResponse(webResultsText, stream, gc)
 					}
 				}
-
 			}
 
+			// 处理模型监控
 			if !config.ConfigInstance.IgnoreModelMonitoring && response.DisplayModel != c.Model {
-				res_text := "\n\n---\n"
-				res_text += fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
+				res_text := "\n\n---\n" + fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
 				full_text += res_text
-				if !stream {
-					break
+				if stream {
+					model.ReturnOpenAIResponse(res_text, stream, gc)
 				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
 			}
+			break // 退出循环
 		}
-		if final {
-			break
-		}
-		// Process each block in the response
-		for _, block := range response.Blocks {
-			// Handle reasoning plan blocks (thinking)
-			if block.ReasoningPlanBlock != nil && len(block.ReasoningPlanBlock.Goals) > 0 {
-
-				res_text := ""
-				if !inThinking && !thinkShown {
-					res_text += "<think>"
-					inThinking = true
-				}
-
-				for _, goal := range block.ReasoningPlanBlock.Goals {
-					if goal.Description != "" && goal.Description != "Beginning analysis" && goal.Description != "Wrapping up analysis" {
-						res_text += goal.Description
-					}
-				}
-				full_text += res_text
-				if !stream {
-					continue
-				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
-			}
-		}
-		for _, block := range response.Blocks {
-			if block.MarkdownBlock != nil && len(block.MarkdownBlock.Chunks) > 0 {
-				res_text := ""
-				if inThinking {
-					res_text += "</think>\n\n"
-					inThinking = false
-					thinkShown = true
-				}
-				for _, chunk := range block.MarkdownBlock.Chunks {
-					if chunk != "" {
-						res_text += chunk
-					}
-				}
-				full_text += res_text
-				if !stream {
-					continue
-				}
-				model.ReturnOpenAIResponse(res_text, stream, gc)
-			}
-		}
-
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -376,7 +399,6 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 	if !stream {
 		model.ReturnOpenAIResponse(full_text, stream, gc)
 	} else {
-		// Send end marker for streaming mode
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
 	}
