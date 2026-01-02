@@ -197,7 +197,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 			},
 			ClientCoordinates:        nil,
 			IsNavSuggestionsDisabled: false,
-			Version:                  "2.18",
+			Version:                  "2.18", // 强制锁定为你抓包看到的 2.18
 		},
 		QueryStr: message,
 	}
