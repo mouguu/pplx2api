@@ -79,7 +79,7 @@ func streamRespose(text string, gc *gin.Context) error {
 		ID:      uuid.New().String(),
 		Object:  "chat.completion.chunk",
 		Created: time.Now().Unix(),
-		Model:   "claude-3-7-sonnet-20250219",
+		Model:   "claude-4.5-sonnet-20251101",
 		Choices: []StreamChoice{
 			{
 				Index: 0,
