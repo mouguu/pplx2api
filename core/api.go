@@ -252,6 +252,10 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 	var currentMarkdown string  // 记录完整的正文历史
 	var hasThinkOpen bool
 
+	// --- 新增状态变量 ---
+	var hasValidData bool = false // 标记是否收到了有效数据
+	var firstFewLines []string    // 用于记录非 SSE 的错误内容（前几行）
+
 	for scanner.Scan() {
 		select {
 		case <-clientDone:
@@ -261,9 +265,22 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 		}
 
 		line := scanner.Text()
-		if line == "" || !strings.HasPrefix(line, "data: ") {
+
+		// --- 修改判断逻辑 ---
+		if line == "" {
 			continue
 		}
+
+		if !strings.HasPrefix(line, "data: ") {
+			// 如果还没收到过有效数据，就记录下这些“垃圾”行，看看是不是 HTML
+			if !hasValidData && len(firstFewLines) < 10 {
+				firstFewLines = append(firstFewLines, line)
+			}
+			continue
+		}
+
+		// 只要进来了这里，说明确实是 SSE 流
+		hasValidData = true
 
 		data := line[6:]
 		var response PerplexityResponse
@@ -385,6 +402,16 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("error reading response: %w", err)
+	}
+
+	// 【新增核心检查】如果跑完了循环，却一行有效数据都没收到
+	if !hasValidData {
+		// 拼接前几行错误日志
+		errorContent := strings.Join(firstFewLines, "\n")
+		logger.Error(fmt.Sprintf("Upstream returned non-SSE content (Likely WAF/Cloudflare): \n%s", errorContent))
+
+		// 抛出错误，而不是返回空成功
+		return fmt.Errorf("upstream blocked request or returned invalid format. First few lines: %s", errorContent)
 	}
 
 	// 4. 发送结束标记或最终全量内容
