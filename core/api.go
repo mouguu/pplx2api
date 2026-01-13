@@ -37,30 +37,43 @@ type PerplexityRequest struct {
 }
 
 type PerplexityParams struct {
-	Attachments              []string      `json:"attachments"`
-	Language                 string        `json:"language"`
-	Timezone                 string        `json:"timezone"`
-	SearchFocus              string        `json:"search_focus"`
-	Sources                  []string      `json:"sources"`
-	SearchRecencyFilter      interface{}   `json:"search_recency_filter"`
-	FrontendUUID             string        `json:"frontend_uuid"`
-	Mode                     string        `json:"mode"`
-	ModelPreference          string        `json:"model_preference"`
-	IsRelatedQuery           bool          `json:"is_related_query"`
-	IsSponsored              bool          `json:"is_sponsored"`
-	VisitorID                string        `json:"visitor_id"`
-	UserNextauthID           string        `json:"user_nextauth_id"`
-	FrontendContextUUID      string        `json:"frontend_context_uuid"`
-	PromptSource             string        `json:"prompt_source"`
-	QuerySource              string        `json:"query_source"`
-	BrowserHistorySummary    []interface{} `json:"browser_history_summary"`
-	IsIncognito              bool          `json:"is_incognito"`
-	UseSchematizedAPI        bool          `json:"use_schematized_api"`
-	SendBackTextInStreaming  bool          `json:"send_back_text_in_streaming_api"`
-	SupportedBlockUseCases   []string      `json:"supported_block_use_cases"`
-	ClientCoordinates        interface{}   `json:"client_coordinates"`
-	IsNavSuggestionsDisabled bool          `json:"is_nav_suggestions_disabled"`
-	Version                  string        `json:"version"`
+	Attachments           []string      `json:"attachments"`
+	Language              string        `json:"language"`
+	Timezone              string        `json:"timezone"`
+	SearchFocus           string        `json:"search_focus"`
+	Sources               []string      `json:"sources"`
+	SearchRecencyFilter   interface{}   `json:"search_recency_filter"`
+	FrontendUUID          string        `json:"frontend_uuid"`
+	Mode                  string        `json:"mode"`
+	ModelPreference       string        `json:"model_preference"`
+	IsRelatedQuery        bool          `json:"is_related_query"`
+	IsSponsored           bool          `json:"is_sponsored"`
+	VisitorID             string        `json:"visitor_id"`
+	UserNextauthID        string        `json:"user_nextauth_id"`
+	FrontendContextUUID   string        `json:"frontend_context_uuid"`
+	PromptSource          string        `json:"prompt_source"`
+	QuerySource           string        `json:"query_source"`
+	BrowserHistorySummary []interface{} `json:"browser_history_summary"`
+	IsIncognito           bool          `json:"is_incognito"`
+	TimeFromFirstType     float64       `json:"time_from_first_type"` // Simulate human typing time: 700ms - 900ms (aligned with cURL capture ~780ms)
+	// This is critical for behavioral fingerprinting
+	LocalSearchEnabled              bool        `json:"local_search_enabled"`
+	UseSchematizedAPI               bool        `json:"use_schematized_api"`
+	SendBackTextInStreamingAPI      bool        `json:"send_back_text_in_streaming_api"` // Renamed from SendBackTextInStreaming
+	SupportedBlockUseCases          []string    `json:"supported_block_use_cases"`
+	ClientCoordinates               interface{} `json:"client_coordinates"`
+	Mentions                        []string    `json:"mentions"`
+	DslQuery                        string      `json:"dsl_query"` // New: Required
+	SkipSearchEnabled               bool        `json:"skip_search_enabled"`
+	IsNavSuggestionsDisabled        bool        `json:"is_nav_suggestions_disabled"`
+	Source                          string      `json:"source"`
+	AlwaysSearchOverride            bool        `json:"always_search_override"`
+	OverrideNoSearch                bool        `json:"override_no_search"`
+	ShouldAskForMcpToolConfirmation bool        `json:"should_ask_for_mcp_tool_confirmation"`
+	BrowserAgentAllowOnceFromToggle bool        `json:"browser_agent_allow_once_from_toggle"`
+	ForceEnableBrowserAgent         bool        `json:"force_enable_browser_agent"`
+	SupportedFeatures               []string    `json:"supported_features"`
+	Version                         string      `json:"version"`
 }
 
 // Response structures
@@ -112,93 +125,108 @@ type ImageModeBlock struct {
 	} `json:"media_items"`
 }
 
-// NewClient creates a new Perplexity API client
-func NewClient(sessionToken string, proxy string, model string, openSerch bool) *Client {
-	fmt.Printf("DEBUG: Current Proxy being used: %s\n", proxy)
+// NewClient 使用你抓取的“原子级”指纹进行初始化
+func NewClient(fullCookie string, proxy string, model string, openSerch bool) *Client {
+	// 1. 模拟 Chrome 131+ 的 TLS 和 H2 指纹
 	client := req.C().ImpersonateChrome().SetTimeout(time.Minute * 10)
-	client.Transport.SetResponseHeaderTimeout(time.Second * 10)
 	if proxy != "" {
 		client.SetProxyURL(proxy)
 	}
 
-	// Set common headers
+	// 2. 预生成本次请求的 UUID
+	reqID := uuid.New().String()
+
+	// 3. 按照你提供的抓包顺序【像素级对齐】Header
+	// 注意：req 会自动处理 :authority 等伪头
 	headers := map[string]string{
-		"accept-language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,zh-TW;q=0.6",
-		"cache-control":   "no-cache",
-		"origin":          "https://www.perplexity.ai",
-		"pragma":          "no-cache",
-		"priority":        "u=1, i",
-		"referer":         "https://www.perplexity.ai/",
+		"accept":                      "text/event-stream",
+		"accept-language":             "en,zh-CN;q=0.9,zh-TW;q=0.8,zh;q=0.7,bn;q=0.6",
+		"content-type":                "application/json",
+		"dnt":                         "1",
+		"origin":                      "https://www.perplexity.ai",
+		"priority":                    "u=1, i",
+		"referer":                     "https://www.perplexity.ai/",
+		"sec-ch-ua":                   `"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"`,
+		"sec-ch-ua-arch":              `"arm"`,
+		"sec-ch-ua-bitness":           `"64"`,
+		"sec-ch-ua-full-version":      `"143.0.7499.193"`,
+		"sec-ch-ua-full-version-list": `"Google Chrome";v="143.0.7499.193", "Chromium";v="143.0.7499.193", "Not A(Brand";v="24.0.0.0"`,
+		"sec-ch-ua-mobile":            "?0",
+		"sec-ch-ua-model":             `""`,
+		"sec-ch-ua-platform":          `"macOS"`,
+		"sec-ch-ua-platform-version":  `"26.2.0"`,
+		"sec-fetch-dest":              "empty",
+		"sec-fetch-mode":              "cors",
+		"sec-fetch-site":              "same-origin",
+		"sec-gpc":                     "1",
+		"user-agent":                  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+		"x-perplexity-request-reason": "perplexity-query-state-provider",
+		"x-request-id":                reqID, // 必须与 Payload 一致
 	}
 
-	for key, value := range headers {
-		client.SetCommonHeader(key, value)
+	for k, v := range headers {
+		client.SetCommonHeader(k, v)
 	}
 
-	// Set cookies
-	if sessionToken != "" {
-		client.SetCommonCookies(&http.Cookie{
-			Name:  "__Secure-next-auth.session-token",
-			Value: sessionToken,
-		})
+	// 4. 注入全量 Cookie
+	// 这里直接解析你抓到的整段 Cookie 字符串
+	if fullCookie != "" {
+		cookies := strings.Split(fullCookie, "; ")
+		for _, c := range cookies {
+			parts := strings.SplitN(c, "=", 2)
+			if len(parts) == 2 {
+				client.SetCommonCookies(&http.Cookie{
+					Name:   parts[0],
+					Value:  parts[1],
+					Domain: ".perplexity.ai",
+				})
+			}
+		}
 	}
 
-	// Create client with visitor ID
-	c := &Client{
-		sessionToken: sessionToken,
-		client:       client,
-		Model:        model,
-		Attachments:  []string{},
-		OpenSerch:    openSerch,
-	}
-
-	return c
+	return &Client{client: client, Model: model, OpenSerch: openSerch}
 }
 
-// SendMessage sends a message to Perplexity and returns the status and response
 func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
-	// Create request body
+	// 获取刚才在 NewClient 里设置的 x-request-id
+	reqID := c.client.Headers.Get("x-request-id")
+
+	// 构造完全对齐的 Payload
 	requestBody := PerplexityRequest{
 		Params: PerplexityParams{
-			Attachments: c.Attachments,
-			Language:    "en-US",
-			Timezone:    "America/New_York",
-			SearchFocus: "writing",
-			Sources:     []string{},
-			// SearchFocus:             "internet",
-			// Sources:                 []string{"web"},
-			SearchRecencyFilter:     nil,
-			FrontendUUID:            uuid.New().String(),
-			Mode:                    "copilot",
-			ModelPreference:         c.Model,
-			IsRelatedQuery:          false,
-			IsSponsored:             false,
-			VisitorID:               uuid.New().String(),
-			UserNextauthID:          uuid.New().String(),
-			FrontendContextUUID:     uuid.New().String(),
-			PromptSource:            "user",
-			QuerySource:             "home",
-			BrowserHistorySummary:   []interface{}{},
-			IsIncognito:             is_incognito,
-			UseSchematizedAPI:       true,
-			SendBackTextInStreaming: false,
-			SupportedBlockUseCases: []string{
-				"answer_modes",
-				"media_items",
-				"knowledge_cards",
-				"inline_entity_cards",
-				"place_widgets",
-				"finance_widgets",
-				"sports_widgets",
-				"shopping_widgets",
-				"jobs_widgets",
-				"search_result_widgets",
-				"entity_list_answer",
-				"todo_list",
-			},
-			ClientCoordinates:        nil,
-			IsNavSuggestionsDisabled: false,
-			Version:                  "2.18", // 强制锁定为你抓包看到的 2.18
+			Attachments:                     []string{},
+			Language:                        "en-US",
+			Timezone:                        "America/Toronto",
+			SearchFocus:                     "internet",
+			Sources:                         []string{"web"},
+			SearchRecencyFilter:             nil,
+			FrontendUUID:                    reqID, // 核心对齐
+			Mode:                            "copilot",
+			ModelPreference:                 "experimental",
+			IsRelatedQuery:                  false,
+			IsSponsored:                     false,
+			FrontendContextUUID:             uuid.New().String(),
+			PromptSource:                    "user",
+			QuerySource:                     "home",
+			IsIncognito:                     is_incognito,
+			TimeFromFirstType:               780.5,
+			LocalSearchEnabled:              false,
+			UseSchematizedAPI:               true,
+			SendBackTextInStreamingAPI:      false,
+			SupportedBlockUseCases:          []string{"answer_modes", "media_items", "knowledge_cards", "inline_entity_cards", "place_widgets", "finance_widgets", "prediction_market_widgets", "sports_widgets", "flight_status_widgets", "news_widgets", "shopping_widgets", "jobs_widgets", "search_result_widgets", "inline_images", "inline_assets", "placeholder_cards", "diff_blocks", "inline_knowledge_cards", "entity_group_v2", "refinement_filters", "canvas_mode", "maps_preview", "answer_tabs", "price_comparison_widgets", "preserve_latex", "generic_onboarding_widgets", "in_context_suggestions"},
+			ClientCoordinates:               nil,
+			Mentions:                        []string{},
+			DslQuery:                        message,
+			SkipSearchEnabled:               true,
+			IsNavSuggestionsDisabled:        false,
+			Source:                          "default",
+			AlwaysSearchOverride:            false,
+			OverrideNoSearch:                false,
+			ShouldAskForMcpToolConfirmation: true,
+			BrowserAgentAllowOnceFromToggle: false,
+			ForceEnableBrowserAgent:         false,
+			SupportedFeatures:               []string{"browser_agent_permission_banner_v1.1"},
+			Version:                         "2.18",
 		},
 		QueryStr: message,
 	}
