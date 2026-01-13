@@ -145,6 +145,14 @@ func init() {
 	fmt.Println("================================================")
 	fmt.Printf("CRITICAL DEBUG: PROXY ENV FROM SYSTEM: %s\n", os.Getenv("PROXY"))
 	fmt.Printf("CRITICAL DEBUG: PROXY STORED IN CONFIG: %s\n", ConfigInstance.Proxy)
+	rawSessions := os.Getenv("SESSIONS")
+	fmt.Printf("CRITICAL DEBUG: RAW SESSIONS LENGTH: %d\n", len(rawSessions))
+	if len(rawSessions) > 50 {
+		fmt.Printf("CRITICAL DEBUG: SESSIONS STARTS WITH: %s...\n", rawSessions[:50])
+	} else {
+		fmt.Printf("CRITICAL DEBUG: FULL SESSIONS: %s\n", rawSessions)
+	}
+	fmt.Printf("CRITICAL DEBUG: HAS cf_clearance: %t\n", strings.Contains(rawSessions, "cf_clearance"))
 	fmt.Println("================================================")
 
 	logger.Info("Loaded config:")
