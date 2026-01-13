@@ -350,7 +350,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					res += delta
 					full_text += res
 					if stream {
-						model.ReturnOpenAIResponse(res, stream, gc)
+						model.ReturnOpenAIResponse(res, stream, gc, c.Model)
 					}
 				}
 			}
@@ -375,7 +375,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					res += delta
 					full_text += res
 					if stream {
-						model.ReturnOpenAIResponse(res, stream, gc)
+						model.ReturnOpenAIResponse(res, stream, gc, c.Model)
 					}
 				}
 			}
@@ -388,7 +388,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				closeTag := "</think>\n\n"
 				full_text += closeTag
 				if stream {
-					model.ReturnOpenAIResponse(closeTag, stream, gc)
+					model.ReturnOpenAIResponse(closeTag, stream, gc, c.Model)
 				}
 				hasThinkOpen = false
 			}
@@ -407,7 +407,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 					full_text += imgText
 					if stream {
-						model.ReturnOpenAIResponse(imgText, stream, gc)
+						model.ReturnOpenAIResponse(imgText, stream, gc, c.Model)
 					}
 				}
 			}
@@ -421,7 +421,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 					}
 					full_text += webText
 					if stream {
-						model.ReturnOpenAIResponse(webText, stream, gc)
+						model.ReturnOpenAIResponse(webText, stream, gc, c.Model)
 					}
 				}
 			}
@@ -431,7 +431,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				monText := "\n\n---\n" + fmt.Sprintf("Display Model: %s\n", config.ModelReverseMapGet(response.DisplayModel, response.DisplayModel))
 				full_text += monText
 				if stream {
-					model.ReturnOpenAIResponse(monText, stream, gc)
+					model.ReturnOpenAIResponse(monText, stream, gc, c.Model)
 				}
 			}
 			break
@@ -454,7 +454,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 	// 4. 发送结束标记或最终全量内容
 	if !stream {
-		model.ReturnOpenAIResponse(full_text, stream, gc)
+		model.ReturnOpenAIResponse(full_text, stream, gc, c.Model)
 	} else {
 		gc.Writer.Write([]byte("data: [DONE]\n\n"))
 		gc.Writer.Flush()
