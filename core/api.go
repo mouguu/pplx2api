@@ -91,6 +91,19 @@ type Block struct {
 	ReasoningPlanBlock *ReasoningPlanBlock `json:"reasoning_plan_block,omitempty"`
 	WebResultBlock     *WebResultBlock     `json:"web_result_block,omitempty"`
 	ImageModeBlock     *ImageModeBlock     `json:"image_mode_block,omitempty"`
+	DiffBlock          *DiffBlock          `json:"diff_block,omitempty"` // Added DiffBlock support
+	IntendedUsage      string              `json:"intended_usage,omitempty"`
+}
+
+type DiffBlock struct {
+	Field   string  `json:"field"`
+	Patches []Patch `json:"patches"`
+}
+
+type Patch struct {
+	Op    string      `json:"op"`
+	Path  string      `json:"path"`
+	Value interface{} `json:"value"`
 }
 
 type MarkdownBlock struct {
@@ -328,7 +341,47 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 
 		// --- 专家级：多块增量去重算法 ---
 		for _, block := range response.Blocks {
-			// 1. 处理推理块
+			// 1. 处理新的 diff_block 逻辑
+			if block.DiffBlock != nil && block.DiffBlock.Field == "markdown_block" {
+				for _, patch := range block.DiffBlock.Patches {
+					if patch.Op == "add" {
+						if text, ok := patch.Value.(string); ok {
+							res := ""
+							if hasThinkOpen {
+								res += "</think>\n\n"
+								hasThinkOpen = false
+							}
+							res += text
+							full_text += res
+							if stream {
+								model.ReturnOpenAIResponse(text, stream, gc, c.Model)
+							}
+						}
+					}
+				}
+			}
+
+			// 2. 处理推理（Reasoning）的 diff_block
+			if block.DiffBlock != nil && block.DiffBlock.Field == "reasoning_plan_block" {
+				for _, patch := range block.DiffBlock.Patches {
+					if patch.Op == "add" {
+						if text, ok := patch.Value.(string); ok {
+							res := ""
+							if !hasThinkOpen {
+								res += "<think>"
+								hasThinkOpen = true
+							}
+							res += text
+							full_text += res
+							if stream {
+								model.ReturnOpenAIResponse(text, stream, gc, c.Model)
+							}
+						}
+					}
+				}
+			}
+
+			// 3. 处理推理旧块（降级兼容）
 			if block.ReasoningPlanBlock != nil {
 				var sb strings.Builder
 				for _, goal := range block.ReasoningPlanBlock.Goals {
@@ -355,7 +408,7 @@ func (c *Client) HandleResponse(body io.ReadCloser, stream bool, gc *gin.Context
 				}
 			}
 
-			// 2. 处理正文块
+			// 4. 处理正文旧块（降级兼容）
 			if block.MarkdownBlock != nil {
 				var sb strings.Builder
 				for _, chunk := range block.MarkdownBlock.Chunks {
