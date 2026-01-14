@@ -24,11 +24,12 @@ import (
 
 // Client represents a Perplexity API client
 type Client struct {
-	sessionToken string
-	client       *req.Client
-	Model        string
-	Attachments  []string
-	OpenSerch    bool
+	sessionToken   string
+	client         *req.Client
+	Model          string
+	Attachments    []string
+	OpenSerch      bool
+	ReadWriteToken string // Dynamic token from session
 }
 
 // Perplexity API structures
@@ -202,7 +203,56 @@ func NewClient(fullCookie string, proxy string, model string, openSerch bool) *C
 		}
 	}
 
-	return &Client{client: client, Model: model, OpenSerch: openSerch}
+	// 5. 初始化 Session 和 Settings (预热 + 获取 Token)
+	// 注意：这里我们不阻塞 NewClient 的返回，但在真正发送消息前，Token 应该是已经准备好的
+	// 为了简单起见，我们在 NewClient 里同步执行一次 InitSession，或者由调用方调用
+	// 鉴于这是一个 CLI 工具，我们尝试在这里同步初始化
+	clientInstance := &Client{client: client, Model: model, OpenSerch: openSerch}
+	if err := clientInstance.InitSession(); err != nil {
+		logger.Error(fmt.Sprintf("Failed to init session: %v", err))
+		// 我们选择不报错退出，而是继续尝试，因为有时候可能只是部分失败
+	}
+	return clientInstance
+}
+
+// SessionResponse represents the response from /api/auth/session
+type SessionResponse struct {
+	User           interface{} `json:"user"`
+	Expires        string      `json:"expires"`
+	ReadWriteToken string      `json:"read_write_token"`
+}
+
+func (c *Client) InitSession() error {
+	// 1. GET /api/auth/session?version=2.18&source=default
+	resp, err := c.client.R().Get("https://www.perplexity.ai/api/auth/session?version=2.18&source=default")
+	if err != nil {
+		return fmt.Errorf("failed to get session: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("session endpoint returned status: %d", resp.StatusCode)
+	}
+
+	// 解析 ReadWriteToken
+	var sessionResp SessionResponse
+	if err := json.Unmarshal(resp.Bytes(), &sessionResp); err == nil && sessionResp.ReadWriteToken != "" {
+		c.ReadWriteToken = sessionResp.ReadWriteToken
+		logger.Info(fmt.Sprintf("Acquired ReadWriteToken: %s", c.ReadWriteToken))
+	} else {
+		// 如果 JSON 解析失败或者没有 Token，尝试从 Response Header 或 Cookie 中找（备用方案）
+		// 目前抓包显示它在 Body 里
+		logger.Info("ReadWriteToken not found in session response body, verify your cookie validity")
+	}
+
+	// 2. GET /rest/user/settings?version=2.18&source=default
+	// 这是一个“仪式感”请求，模拟真实浏览器行为
+	respSettings, err := c.client.R().Get("https://www.perplexity.ai/rest/user/settings?version=2.18&source=default")
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to get settings: %v", err))
+	} else {
+		logger.Info(fmt.Sprintf("Settings endpoint status: %d", respSettings.StatusCode))
+	}
+
+	return nil
 }
 
 func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc *gin.Context) (int, error) {
@@ -252,6 +302,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 			Version:                         "2.18",
 			IsProReasoningMode:              true,
 			ExpectSearchResults:             "true",
+			ReadWriteToken:                  c.ReadWriteToken, // Use dynamic token
 		},
 		QueryStr: message,
 	}
@@ -264,7 +315,7 @@ func (c *Client) SendMessage(message string, stream bool, is_incognito bool, gc 
 	resp, err := c.client.R().DisableAutoReadResponse().
 		SetHeader("x-request-id", requestID).
 		SetBody(requestBody).
-		Post("https://www.perplexity.ai/rest/sse/perplexity_ask")
+		Post("https://www.perplexity.ai/rest/sse/perplexity_ask?version=2.18&source=default")
 
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error sending request: %v", err))
