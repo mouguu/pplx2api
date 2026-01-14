@@ -252,6 +252,17 @@ func (c *Client) InitSession() error {
 		logger.Info(fmt.Sprintf("Settings endpoint status: %d", respSettings.StatusCode))
 	}
 
+	// 3. 模拟加载静态资源 ("Heat Simulation")
+	// 这是一个核心的指纹点，证明我们解析了 HTML
+	respStatic, err := c.client.R().
+		SetHeader("If-None-Match", `W/"EnDpeNhY"`). // 假设我们已经缓存了 current hash
+		Get("https://pplx-next-static-public.perplexity.ai/_spa/assets/spa-shell-EnDpeNhY.js")
+	if err != nil {
+		logger.Error(fmt.Sprintf("Failed to fetch static resource: %v", err))
+	} else {
+		logger.Info(fmt.Sprintf("Static resource fetch status: %d", respStatic.StatusCode))
+	}
+
 	return nil
 }
 
